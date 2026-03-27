@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenClaw Dashboard Launcher</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      max-width: 600px;
+      width: 100%;
+      text-align: center;
+    }
+    h1 {
+      font-size: 28px;
+      margin-bottom: 10px;
+      color: #58a6ff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+    }
+    .subtitle {
+      color: #8b949e;
+      margin-bottom: 30px;
+      font-size: 14px;
+    }
+    .button-group {
+      display: flex;
+      gap: 15px;
+      margin-bottom: 25px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .btn {
+      background: #21262d;
+      color: #58a6ff;
+      border: 1px solid #30363d;
+      padding: 14px 24px;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn:hover {
+      background: #30363d;
+      border-color: #58a6ff;
+      transform: translateY(-2px);
+    }
+    .btn-primary {
+      background: #238636;
+      color: #fff;
+      border-color: #2ea043;
+    }
+    .btn-primary:hover {
+      background: #2ea043;
+    }
+    .instructions {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 20px;
+      text-align: left;
+      margin-top: 20px;
+    }
+    .instructions h3 {
+      color: #58a6ff;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+    .instructions ol {
+      padding-left: 20px;
+      color: #c9d1d9;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .instructions li {
+      margin-bottom: 8px;
+    }
+    .note {
+      font-size: 12px;
+      color: #8b949e;
+      margin-top: 15px;
+      font-style: italic;
+    }
+    .keyboard-shortcut {
+      background: #21262d;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🦸 OpenClaw Dashboard</h1>
+    <p class="subtitle">Launch your monitoring interface</p>
+    
+    <div class="button-group">
+      <a href="#" class="btn btn-primary" onclick="openBoth(); return false;">
+        🚀 Open Both (Split View)
+      </a>
+      <a href="http://godzilla.local:8789" target="_blank" class="btn">
+        🦞 Llama Monitor
+      </a>
+      <a href="http://127.0.0.1:18789/#token=3d747ae7ee2f0b41cd424d545f5f9f6b3da5ad0a5ced6808" target="_blank" class="btn">
+        🎮 Control UI
+      </a>
+    </div>
+    
+    <div class="instructions">
+      <h3>📺 Chrome Split View Setup</h3>
+      <ol>
+        <li>Click "Open Both" above, or open each link in separate tabs</li>
+        <li>Right-click each tab and select <span class="keyboard-shortcut">Pin</span> (optional)</li>
+        <li>Drag one tab out to create a second window</li>
+        <li>Position windows side by side:
+          <ul>
+            <li><strong>Windows:</strong> <span class="keyboard-shortcut">Win + ←</span> and <span class="keyboard-shortcut">Win + →</span></li>
+            <li><strong>macOS:</strong> Click green fullscreen button → Split View</li>
+            <li><strong>Manual:</strong> Resize windows to 50% width each</li>
+          </ul>
+        </li>
+        <li>Control UI on left, Monitor on right (or your preference)</li>
+      </ol>
+      <p class="note">💡 Tip: Once arranged, you can bookmark both URLs and reopen them in your preferred layout anytime.</p>
+    </div>
+    
+    <div class="instructions" style="margin-top: 20px;">
+      <h3>⚙️ Running Services</h3>
+      <p style="font-size: 13px; color: #c9d1d9; line-height: 1.6;">
+        Make sure these are running:<br>
+        <code style="background: #21262d; padding: 2px 6px; border-radius: 4px;">node /home/alex/.openclaw/workspace/control-ui-server.js</code><br>
+        <code style="background: #21262d; padding: 2px 6px; border-radius: 4px;">node /home/alex/.openclaw/workspace/monitor-llama-web.js</code>
+      </p>
+    </div>
+  </div>
+
+  <script>
+    function openBoth() {
+      // Open Control UI first
+      window.open('http://127.0.0.1:18789/#token=3d747ae7ee2f0b41cd424d545f5f9f6b3da5ad0a5ced6808', '_blank');
+      
+      // Small delay, then open Monitor
+      setTimeout(() => {
+        window.open('http://godzilla.local:8789', '_blank');
+      }, 300);
+      
+      // Show instructions
+      alert('📺 Two tabs opened!\n\nNow arrange them side by side:\n• Windows: Win+← and Win+→\n• macOS: Use Split View or drag windows\n• Manual: Resize to 50% width each');
+    }
+  </script>
+</body>
+</html>
