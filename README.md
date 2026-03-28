@@ -79,6 +79,35 @@ sudo systemctl start llama-server-visualizer
 
 ---
 
+## Screenshots
+
+### Monitor (Port 8789)
+
+Real-time performance tracking with active tasks, completed task history, and resource monitoring:
+
+![Llama Monitor](screenshots/monitor.png)
+
+**Key Features:**
+- Active tasks with real-time progress bars
+- Last 5 completed tasks with timing stats (prompt/eval/overall t/s)
+- Resource monitoring (RAM, VRAM, GPU temp, GPU clock)
+- Color-coded resource bars (green <60%, yellow 60-80%, red >80%)
+
+### Visualizer (Port 8791)
+
+Window into cache internals with real-time animations:
+
+![Llama Visualizer](screenshots/visualizer.png)
+
+**Key Features:**
+- All cached prompts displayed (not just last 5)
+- Cache hits flash green for 2 seconds
+- Evictions fade out over 1 second
+- Checkpoint progress tracking (0-32)
+- Recent events log with timestamps
+
+---
+
 ## Features
 
 ### Monitor (8789)
