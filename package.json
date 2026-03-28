@@ -1,0 +1,43 @@
+{
+  "name": "llama-server-monitor",
+  "version": "0.1.0",
+  "description": "Real-time monitoring and visualization tools for llama.cpp inferencing servers",
+  "main": "monitor-llama-web.js",
+  "scripts": {
+    "start:monitor": "node monitor-llama-web.js",
+    "start:visualizer": "node llama-server-visualizer.js",
+    "start:all": "npm run start:monitor & npm run start:visualizer",
+    "dev": "nodemon monitor-llama-web.js",
+    "dev:all": "concurrently \"nodemon monitor-llama-web.js\" \"nodemon llama-server-visualizer.js\""
+  },
+  "keywords": [
+    "llama",
+    "llama.cpp",
+    "monitor",
+    "visualization",
+    "llm",
+    "inference",
+    "server",
+    "performance"
+  ],
+  "author": "Alex",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/llama-server-monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/llama-server-monitor/issues"
+  },
+  "homepage": "https://github.com/yourusername/llama-server-monitor#readme",
+  "dependencies": {
+    "ws": "^8.14.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

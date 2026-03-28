@@ -1,0 +1,16 @@
+[Unit]
+Description=Llama Monitor Web Interface
+After=network.target llama-server.service
+
+[Service]
+Type=simple
+User=alex
+WorkingDirectory=/home/alex/.openclaw/workspace
+ExecStart=/usr/bin/node /home/alex/.openclaw/workspace/monitor-llama-web.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

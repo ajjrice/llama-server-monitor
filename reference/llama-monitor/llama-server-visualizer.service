@@ -1,0 +1,16 @@
+[Unit]
+Description=Llama Server Visualizer - Window into the Heart of Llama Server
+After=network.target llama-server.service
+
+[Service]
+Type=simple
+User=alex
+WorkingDirectory=/home/alex/.openclaw/workspace
+ExecStart=/usr/bin/node /home/alex/.openclaw/workspace/llama-server-visualizer.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

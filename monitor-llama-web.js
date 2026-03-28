@@ -18,9 +18,11 @@ const WS_PORT = process.env.MONITOR_WS_PORT || 8790;
 
 // Track state
 let lastSlotsHash = '';
+let lastCompletedHash = '';
 let lastCheckpointState = {};
 let lastResources = '';
 let clients = new Set();
+let recentEvalTps = []; // Track last 10 generation speeds
 
 function getSystemResources() {
   const resources = {
@@ -47,7 +49,7 @@ function getSystemResources() {
   } catch (e) {}
   
   try {
-    const nvidiaSmi = execSync('nvidia-smi --query-gpu=memory.used,memory.total,temperature.gpu,gpu_clocks --format=csv,noheader,nounits 2>/dev/null', { encoding: 'utf8' });
+    const nvidiaSmi = execSync('nvidia-smi --query-gpu=memory.used,memory.total,temperature.gpu,clocks.current.graphics --format=csv,noheader,nounits 2>/dev/null', { encoding: 'utf8' });
     const lines = nvidiaSmi.trim().split('\n');
     
     // Parse VRAM (first GPU's memory)
@@ -88,9 +90,85 @@ function getSystemResources() {
 }
 
 function parseLlamaLogs(output) {
-  const slots = {};
+  const activeSlots = {};
+  const completedSlots = [];
   const lines = output.split('\n');
   
+  // First pass: find all completed tasks with their timing stats
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    
+    // Look for print_timing header
+    const timingMatch = line.match(/slot print_timing: id\s+(\d+)\s+\|\s+task\s+(\d+)/);
+    if (timingMatch) {
+      const slotId = parseInt(timingMatch[1]);
+      const taskId = parseInt(timingMatch[2]);
+      
+      // Extract timing stats from the next few lines
+      let promptEvalTime = null, promptTokens = null, promptTps = null;
+      let evalTime = null, evalTokens = null, evalTps = null;
+      let totalTime = null, totalTokens = null;
+      
+      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        const nextLine = lines[j];
+        
+        const promptMatch = nextLine.match(/prompt eval time\s*=\s*(\d+\.?\d*)\s*ms\s*\/\s*(\d+)\s*tokens\s*\(\s*(\d+\.?\d*)\s*ms per token,\s*(\d+\.?\d*)\s*tokens per second\)/);
+        if (promptMatch) {
+          promptEvalTime = parseFloat(promptMatch[1]);
+          promptTokens = parseInt(promptMatch[2]);
+          promptTps = parseFloat(promptMatch[4]);
+        }
+        
+        const evalMatch = nextLine.match(/eval time\s*=\s*(\d+\.?\d*)\s*ms\s*\/\s*(\d+)\s*tokens\s*\(\s*(\d+\.?\d*)\s*ms per token,\s*(\d+\.?\d*)\s*tokens per second\)/);
+        if (evalMatch) {
+          evalTime = parseFloat(evalMatch[1]);
+          evalTokens = parseInt(evalMatch[2]);
+          evalTps = parseFloat(evalMatch[4]);
+        }
+        
+        const totalMatch = nextLine.match(/total time\s*=\s*(\d+\.?\d*)\s*ms\s*\/\s*(\d+)\s*tokens/);
+        if (totalMatch) {
+          totalTime = parseFloat(totalMatch[1]);
+          totalTokens = parseInt(totalMatch[2]);
+        }
+      }
+      
+      // Only add if we got the key stats
+      if (promptTps && evalTps) {
+        // Calculate times in reverse from tokens and t/s (since stdout doesn't give us the time directly)
+        const promptTimeSeconds = promptTokens / promptTps;
+        const evalTimeSeconds = evalTokens / evalTps;
+        
+        completedSlots.push({
+          slotId,
+          taskId,
+          state: 'done',
+          promptTps,
+          promptTokens,
+          promptTimeSeconds,
+          evalTps,
+          evalTokens,
+          evalTimeSeconds,
+          totalTime: totalTime || (promptTimeSeconds + evalTimeSeconds) * 1000,
+          totalTimeSeconds: totalTime || (promptTimeSeconds + evalTimeSeconds),
+          totalTokens: totalTokens || (promptTokens || 0) + (evalTokens || 0),
+          timestamp: Date.now()
+        });
+        
+        // Track for average calculation
+        recentEvalTps.push(evalTps);
+        if (recentEvalTps.length > 10) {
+          recentEvalTps.shift();
+        }
+      }
+      continue;
+    }
+  }
+  
+  // Keep only last 5 completed tasks (most recent first)
+  const completedToReturn = completedSlots.slice(-5).reverse();
+  
+  // Second pass: find active slots
   for (const line of lines) {
     const processingMatch = line.match(/slot update_slots: id\s+(\d+)\s+\|\s+task\s+(\d+)\s+\|\s+prompt processing progress.*?progress\s*=\s*([\d.]+)/);
     if (processingMatch) {
@@ -100,13 +178,17 @@ function parseLlamaLogs(output) {
       
       lastCheckpointState[slotId] = null;
       
-      slots[slotId] = {
-        slotId,
-        taskId,
-        state: 'processing',
-        progress,
-        lastSeen: Date.now()
-      };
+      // Don't add if this task is already in completed
+      const isInCompleted = completedSlots.some(c => c.taskId === taskId);
+      if (!isInCompleted) {
+        activeSlots[slotId] = {
+          slotId,
+          taskId,
+          state: 'processing',
+          progress,
+          lastSeen: Date.now()
+        };
+      }
       continue;
     }
     
@@ -118,14 +200,17 @@ function parseLlamaLogs(output) {
       if (lastCheckpointState[slotId] !== taskId) {
         lastCheckpointState[slotId] = taskId;
         
-        if (!slots[slotId] || slots[slotId].state !== 'processing') {
-          slots[slotId] = {
-            slotId,
-            taskId,
-            state: 'checkpoint',
-            progress: 0,
-            lastSeen: Date.now()
-          };
+        const isInCompleted = completedSlots.some(c => c.taskId === taskId);
+        if (!activeSlots[slotId] || activeSlots[slotId].state !== 'processing') {
+          if (!isInCompleted) {
+            activeSlots[slotId] = {
+              slotId,
+              taskId,
+              state: 'checkpoint',
+              progress: 0,
+              lastSeen: Date.now()
+            };
+          }
         }
       }
       continue;
@@ -138,26 +223,31 @@ function parseLlamaLogs(output) {
       
       lastCheckpointState[slotId] = null;
       
-      if (slots[slotId]) {
-        slots[slotId].state = 'generating';
-        slots[slotId].progress = 1.0;
-        slots[slotId].lastSeen = Date.now();
+      const isInCompleted = completedSlots.some(c => c.taskId === taskId);
+      if (activeSlots[slotId] && !isInCompleted) {
+        activeSlots[slotId].state = 'generating';
+        activeSlots[slotId].progress = 1.0;
+        activeSlots[slotId].lastSeen = Date.now();
+        
+        // Calculate estimated tokens generated based on average speed
+        if (recentEvalTps.length > 0) {
+          const avgTps = recentEvalTps.reduce((a, b) => a + b, 0) / recentEvalTps.length;
+          // Estimate how long we've been generating (rough guess: 2 seconds after "prompt processing done")
+          const secondsGenerating = 2;
+          activeSlots[slotId].estimatedTokens = Math.round(avgTps * secondsGenerating);
+        }
       }
-      continue;
-    }
-    
-    const doneMatch = line.match(/slot print_timing: id\s+(\d+)\s+\|\s+task\s+(\d+)/);
-    if (doneMatch) {
-      const slotId = parseInt(doneMatch[1]);
-      if (slots[slotId]) {
-        slots[slotId].state = 'done';
-      }
-      lastCheckpointState[slotId] = null;
       continue;
     }
   }
   
-  return Object.values(slots).filter(slot => slot.state !== 'done');
+  const activeSlotsArray = Object.values(activeSlots);
+  
+  return {
+    active: activeSlotsArray,
+    completed: completedToReturn,
+    avgTps: recentEvalTps.length > 0 ? recentEvalTps.reduce((a, b) => a + b, 0) / recentEvalTps.length : 20
+  };
 }
 
 function getSlotsHash(slots) {
@@ -172,26 +262,29 @@ function getSlotsHash(slots) {
 function getMonitorData() {
   try {
     const output = execSync('sudo journalctl -u llama-server -n 500 --no-pager 2>&1', { encoding: 'utf8' });
-    const slots = parseLlamaLogs(output);
+    const parsed = parseLlamaLogs(output);
     const resources = getSystemResources();
     
-    const slotsHash = getSlotsHash(slots);
+    const activeHash = getSlotsHash(parsed.active);
+    const completedHash = getSlotsHash(parsed.completed);
     const resourcesStr = JSON.stringify({
       ram: { percent: resources.ram.percent, used: resources.ram.used, total: resources.ram.total },
       vram: { percent: resources.vram.percent, used: resources.vram.used, total: resources.vram.total, available: resources.vram.available }
     });
     
     // Only return data if something changed
-    if (slotsHash === lastSlotsHash && resourcesStr === lastResources) {
+    if (activeHash === lastSlotsHash && completedHash === lastCompletedHash && resourcesStr === lastResources) {
       return null;
     }
     
-    lastSlotsHash = slotsHash;
+    lastSlotsHash = activeHash;
+    lastCompletedHash = completedHash;
     lastResources = resourcesStr;
     
     return {
       timestamp: Date.now(),
-      slots: slots,
+      active: parsed.active,
+      completed: parsed.completed,
       resources: resources
     };
   } catch (error) {
@@ -213,6 +306,9 @@ const htmlContent = `<!DOCTYPE html>
       color: #eee;
       padding: 10px;
       font-size: 12px;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
     }
     .header {
       color: #00d4ff;
@@ -220,54 +316,14 @@ const htmlContent = `<!DOCTYPE html>
       margin-bottom: 8px;
       font-size: 14px;
     }
-    .resources {
-      margin-bottom: 10px;
-      padding: 8px;
-      background: #16213e;
-      border-radius: 4px;
-    }
-    .resource-row {
-      margin-bottom: 10px;
-    }
-    .resource-row:last-child { margin-bottom: 0; }
-    .resource-header {
-      display: flex;
-      justify-content: space-between;
-      margin-bottom: 4px;
-    }
-    .resource-label {
-      font-weight: bold;
+    .main-content {
+      flex: 1;
       display: flex;
       flex-direction: column;
     }
-    .resource-name {
-      font-size: 12px;
-    }
-    .resource-detail {
-      font-size: 10px;
-      color: #94a3b8;
-      margin-top: 1px;
-    }
-    .resource-percent {
-      font-size: 11px;
-      color: #94a3b8;
-    }
-    .resource-bar {
-      height: 8px;
-      background: #0f3460;
-      border-radius: 4px;
-      overflow: hidden;
-    }
-    .resource-bar-fill {
-      height: 100%;
-      border-radius: 4px;
-      transition: width 0.2s;
-    }
-    .resource-bar-fill.green { background: #4ade80; }
-    .resource-bar-fill.yellow { background: #fbbf24; }
-    .resource-bar-fill.red { background: #f87171; }
     .tasks {
-      margin-top: 10px;
+      flex: 1;
+      min-height: 0;
     }
     .task {
       padding: 8px;
@@ -289,6 +345,7 @@ const htmlContent = `<!DOCTYPE html>
     .task-state.checkpoint { color: #22d3ee; }
     .task-state.processing { color: #fbbf24; }
     .task-state.generating { color: #4ade80; }
+    .task-state.done { color: #7aa37a; }
     .task-progress {
       font-size: 10px;
       color: #94a3b8;
@@ -305,25 +362,97 @@ const htmlContent = `<!DOCTYPE html>
       border-radius: 3px;
       transition: width 0.1s;
     }
+    .task-stats {
+      font-size: 9px;
+      color: #94a3b8;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+    .task-stats-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+    .task-stats-left {
+      color: #94a3b8;
+    }
+    .task-stats-right {
+      color: #7aa37a;
+      font-weight: bold;
+      text-align: right;
+    }
+    
     .idle {
       color: #64748b;
       font-style: italic;
       padding: 10px;
       text-align: center;
     }
+    .resources {
+      margin-top: auto;
+      padding: 8px;
+      background: #16213e;
+      border-radius: 4px;
+    }
+    .resource-row {
+      margin-bottom: 10px;
+    }
+    .resource-row:last-child { margin-bottom: 0; }
+    .resource-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 2px;
+    }
+    .resource-label {
+      font-weight: bold;
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+    }
+    .resource-name {
+      font-size: 12px;
+    }
+    .resource-detail {
+      font-size: 10px;
+      color: #94a3b8;
+    }
+    .resource-percent {
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .resource-bar {
+      height: 3px;
+      background: #0f3460;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .resource-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.2s;
+    }
+    .resource-bar-fill.green { background: #4ade80; }
+    .resource-bar-fill.yellow { background: #fbbf24; }
+    .resource-bar-fill.red { background: #f87171; }
   </style>
 </head>
 <body>
   <div class="header">🦞 Llama Server Monitor</div>
   
-  <div class="resources">
+  <div class="main-content">
+    <div class="tasks" id="tasks">
+      <div class="idle">Waiting for activity...</div>
+    </div>
+    
+    <div class="resources">
     <div class="resource-row">
       <div class="resource-header">
         <div class="resource-label">
           <span class="resource-name">RAM</span>
           <span class="resource-detail" id="ram-detail">--</span>
+          <span class="resource-percent" id="ram-percent">--</span>
         </div>
-        <span class="resource-percent" id="ram-percent">--</span>
       </div>
       <div class="resource-bar">
         <div class="resource-bar-fill" id="ram-bar" style="width: 0%"></div>
@@ -335,8 +464,8 @@ const htmlContent = `<!DOCTYPE html>
         <div class="resource-label">
           <span class="resource-name">VRAM</span>
           <span class="resource-detail" id="vram-detail">--</span>
+          <span class="resource-percent" id="vram-percent">--</span>
         </div>
-        <span class="resource-percent" id="vram-percent">--</span>
       </div>
       <div class="resource-bar">
         <div class="resource-bar-fill" id="vram-bar" style="width: 0%"></div>
@@ -348,8 +477,8 @@ const htmlContent = `<!DOCTYPE html>
         <div class="resource-label">
           <span class="resource-name">GPU Temp</span>
           <span class="resource-detail" id="temp-detail">--</span>
+          <span class="resource-percent" id="temp-percent">--</span>
         </div>
-        <span class="resource-percent" id="temp-percent">--</span>
       </div>
       <div class="resource-bar">
         <div class="resource-bar-fill" id="temp-bar" style="width: 0%"></div>
@@ -361,17 +490,14 @@ const htmlContent = `<!DOCTYPE html>
         <div class="resource-label">
           <span class="resource-name">GPU Clock</span>
           <span class="resource-detail" id="clock-detail">--</span>
+          <span class="resource-percent" id="clock-percent">--</span>
         </div>
-        <span class="resource-percent" id="clock-percent">--</span>
       </div>
       <div class="resource-bar">
         <div class="resource-bar-fill" id="clock-bar" style="width: 0%"></div>
       </div>
     </div>
   </div>
-  
-  <div class="tasks" id="tasks">
-    <div class="idle">Waiting for activity...</div>
   </div>
   
   <script>
@@ -400,7 +526,9 @@ const htmlContent = `<!DOCTYPE html>
       const vramRow = document.getElementById('vram-row');
       if (data.resources.vram.available) {
         vramRow.style.display = 'block';
-        document.getElementById('vram-detail').textContent = data.resources.vram.used + 'MB/' + data.resources.vram.total + 'MB';
+        const vramGB = (data.resources.vram.used / 1024).toFixed(1);
+        const vramTotalGB = (data.resources.vram.total / 1024).toFixed(1);
+        document.getElementById('vram-detail').textContent = vramGB + 'GB/' + vramTotalGB + 'GB';
         document.getElementById('vram-percent').textContent = data.resources.vram.percent + '%';
         const vramBar = document.getElementById('vram-bar');
         vramBar.style.width = data.resources.vram.percent + '%';
@@ -439,40 +567,91 @@ const htmlContent = `<!DOCTYPE html>
       
       // Update tasks
       const tasksContainer = document.getElementById('tasks');
-      if (data.slots.length === 0) {
+      const hasActive = data.active && data.active.length > 0;
+      const hasCompleted = data.completed && data.completed.length > 0;
+      
+      if (!hasActive && !hasCompleted) {
         tasksContainer.innerHTML = '<div class="idle">No active tasks (server is idle)</div>';
         return;
       }
       
       let tasksHTML = '';
-      for (const slot of data.slots) {
-        const progressPercent = Math.round(slot.progress * 100);
-        const filled = Math.min(Math.round(slot.progress * 50), 50);
-        
-        let stateText = slot.state;
-        if (slot.state === 'checkpoint') {
-          stateText = 'checkpoint loading';
+      
+      // Render active slots first
+      if (hasActive) {
+        for (const slot of data.active) {
+          const progressPercent = Math.round(slot.progress * 100);
+          const filled = Math.min(Math.round(slot.progress * 50), 50);
+          
+          let stateText = slot.state;
+          if (slot.state === 'checkpoint') {
+            stateText = 'checkpoint loading';
+          }
+          
+          tasksHTML += '<div class="task">';
+          tasksHTML += '<div class="task-header">';
+          tasksHTML += '<span class="task-id">Slot ' + slot.slotId + ' - Task #' + slot.taskId + '</span>';
+          tasksHTML += '<span class="task-state ' + slot.state + '">' + stateText + '</span>';
+          tasksHTML += '</div>';
+          
+          if (slot.state === 'generating') {
+            // Show estimated tokens generated
+            const avgTps = data.avgTps || 20;
+            // Update estimate based on time since last update
+            const estimatedTokens = slot.estimatedTokens ? slot.estimatedTokens + Math.round(avgTps * 0.1) : Math.round(avgTps * 0.1);
+            slot.estimatedTokens = estimatedTokens; // Store for next update
+            tasksHTML += '<div class="task-progress">Estimated tokens generated: ' + estimatedTokens + '</div>';
+          } else if (slot.state !== 'checkpoint') {
+            tasksHTML += '<div class="task-progress">Progress: ' + progressPercent + '%</div>';
+          } else {
+            tasksHTML += '<div class="task-progress">Loading checkpoint...</div>';
+          }
+          
+          const barColor = slot.state === 'generating' ? '#4ade80' : (slot.state === 'checkpoint' ? '#22d3ee' : '#fbbf24');
+          const barWidth = slot.state === 'generating' ? 100 : (filled * 2);
+          
+          tasksHTML += '<div class="task-bar">';
+          tasksHTML += '<div class="task-bar-fill" style="width: ' + barWidth + '%; background: ' + barColor + '"></div>';
+          tasksHTML += '<span class="task-bar-percent">' + progressPercent + '%</span>';
+          tasksHTML += '</div>';
+          tasksHTML += '</div>';
         }
-        
-        tasksHTML += '<div class="task">';
-        tasksHTML += '<div class="task-header">';
-        tasksHTML += '<span class="task-id">Slot ' + slot.slotId + ' - Task #' + slot.taskId + '</span>';
-        tasksHTML += '<span class="task-state ' + slot.state + '">' + stateText + '</span>';
-        tasksHTML += '</div>';
-        
-        if (slot.state !== 'checkpoint') {
-          tasksHTML += '<div class="task-progress">Progress: ' + progressPercent + '%</div>';
-        } else {
-          tasksHTML += '<div class="task-progress">Loading checkpoint...</div>';
+      }
+      
+      // Render completed slots
+      if (hasCompleted) {
+        for (const slot of data.completed) {
+          tasksHTML += '<div class="task">';
+          tasksHTML += '<div class="task-header">';
+          tasksHTML += '<span class="task-id">Slot ' + slot.slotId + ' - Task #' + slot.taskId + '</span>';
+          tasksHTML += '<span class="task-state done">Completed</span>';
+          tasksHTML += '</div>';
+          
+          if (slot.promptTps && slot.evalTps) {
+            // Calculate overall tokens per second
+            const totalSeconds = slot.totalTime / 1000;
+            const overallTps = slot.totalTokens / totalSeconds;
+            
+            tasksHTML += '<div class="task-stats">';
+            tasksHTML += '<div class="task-stats-row">';
+            tasksHTML += '<span class="task-stats-left">Prompt: ' + (slot.promptEvalTime / 1000).toFixed(1) + 's / ' + slot.promptTokens + ' tokens</span>';
+            tasksHTML += '<span class="task-stats-right">' + slot.promptTps.toFixed(1) + ' t/s</span>';
+            tasksHTML += '</div>';
+            tasksHTML += '<div class="task-stats-row">';
+            tasksHTML += '<span class="task-stats-left">Eval: ' + (slot.evalTime / 1000).toFixed(1) + 's / ' + slot.evalTokens + ' tokens</span>';
+            tasksHTML += '<span class="task-stats-right">' + slot.evalTps.toFixed(1) + ' t/s</span>';
+            tasksHTML += '</div>';
+            tasksHTML += '<div class="task-stats-row">';
+            tasksHTML += '<span class="task-stats-left">Total: ' + totalSeconds.toFixed(1) + 's / ' + slot.totalTokens + ' tokens</span>';
+            tasksHTML += '<span class="task-stats-right">' + overallTps.toFixed(1) + ' t/s</span>';
+            tasksHTML += '</div>';
+            tasksHTML += '</div>';
+          } else {
+            tasksHTML += '<div class="task-progress">Completed</div>';
+          }
+          
+          tasksHTML += '</div>';
         }
-        
-        const barColor = slot.state === 'generating' ? '#4ade80' : (slot.state === 'checkpoint' ? '#22d3ee' : '#fbbf24');
-        const barWidth = slot.state === 'generating' ? 100 : (filled * 2);
-        
-        tasksHTML += '<div class="task-bar">';
-        tasksHTML += '<div class="task-bar-fill" style="width: ' + barWidth + '%; background: ' + barColor + '"></div>';
-        tasksHTML += '<span class="task-bar-percent">' + progressPercent + '%</span>';
-        tasksHTML += '</div></div>';
       }
       
       tasksContainer.innerHTML = tasksHTML;
