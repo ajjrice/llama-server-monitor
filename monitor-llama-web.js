@@ -739,11 +739,27 @@ wss.on('connection', (ws) => {
 });
 
 // Poll and broadcast updates
+let lastBroadcastTime = Date.now();
+const BROADCAST_INTERVAL = 5000; // 5 seconds
+
 function pollAndBroadcast() {
   const data = getMonitorData();
+  const now = Date.now();
   
-  if (data) {
-    const message = JSON.stringify(data);
+  // Always broadcast if 5 seconds have passed, even if nothing changed
+  const forceBroadcast = (now - lastBroadcastTime) >= BROADCAST_INTERVAL;
+  
+  if (data || forceBroadcast) {
+    // If no changes detected but we're force-broadcasting, get fresh data
+    const messageData = data || getMonitorData() || {
+      timestamp: now,
+      active: [],
+      completed: [],
+      resources: getSystemResources()
+    };
+    
+    const message = JSON.stringify(messageData);
+    lastBroadcastTime = now;
     
     clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
