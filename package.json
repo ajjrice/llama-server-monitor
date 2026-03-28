@@ -24,12 +24,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/llama-server-monitor.git"
+    "url": "https://github.com/ajjrice/llama-server-monitor.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/llama-server-monitor/issues"
+    "url": "https://github.com/ajjrice/llama-server-monitor/issues"
   },
-  "homepage": "https://github.com/yourusername/llama-server-monitor#readme",
+  "homepage": "https://github.com/ajjrice/llama-server-monitor#readme",
   "dependencies": {
     "ws": "^8.14.0"
   },

@@ -4,6 +4,7 @@
 
 ![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-green.svg)
+![GitHub stars](https://img.shields.io/github/stars/ajjrice/llama-server-monitor.svg?style=social&label=Star)
 
 ---
 
@@ -322,7 +323,7 @@ MIT License - see [LICENSE](LICENSE) for details
 ## Author
 
 **Alex**  
-GitHub: [@yourusername](https://github.com/yourusername)
+GitHub: [@ajjrice](https://github.com/ajjrice)
 
 ---
 
