@@ -87,11 +87,11 @@ Real-time performance tracking with active tasks, completed task history, and re
 
 ![Llama Monitor](screenshots/monitor.png)
 
-**Key Features:**
-- Active tasks with real-time progress bars
-- Last 5 completed tasks with timing stats (prompt/eval/overall t/s)
-- Resource monitoring (RAM, VRAM, GPU temp, GPU clock)
-- Color-coded resource bars (green <60%, yellow 60-80%, red >80%)
+**What You See:**
+- **Active Tasks** - Real-time progress bars showing current inference jobs
+- **Completed Tasks** - Last 5 jobs with detailed timing (prompt/eval/overall t/s)
+- **Resource Bars** - RAM, VRAM, GPU temperature, and clock speed with color-coded usage
+- **Relative Timestamps** - "2m ago", "45s ago" to show when tasks completed
 
 ### Visualizer (Port 8791)
 
@@ -99,12 +99,16 @@ Window into cache internals with real-time animations:
 
 ![Llama Visualizer](screenshots/visualizer.png)
 
-**Key Features:**
-- All cached prompts displayed (not just last 5)
-- Cache hits flash green for 2 seconds
-- Evictions fade out over 1 second
-- Checkpoint progress tracking (0-32)
-- Recent events log with timestamps
+**What You See:**
+- **Cache Utilization** - Total memory used vs limit with gradient bar
+- **All Cached Prompts** - Every prompt in cache with token counts and checkpoint ratios
+- **Checkpoint Progress** - Real-time checkpoint creation (0-32) for active tasks
+- **Recent Events Log** - Live feed of cache hits, evictions, and completions
+
+**Animations (Not Visible in Static Images):**
+- 🔥 **Cache Hits** - Prompt blocks flash bright green for 2 seconds
+- 🗑️ **Evictions** - Prompt blocks fade out over 1 second when removed from cache
+- 💾 **Checkpoints** - Progress bars fill smoothly as checkpoints are created
 
 ---
 
