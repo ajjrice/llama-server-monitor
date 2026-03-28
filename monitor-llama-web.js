@@ -23,6 +23,23 @@ let lastCheckpointState = {};
 let lastResources = '';
 let clients = new Set();
 let recentEvalTps = []; // Track last 10 generation speeds
+let seenTaskIds = new Set(); // Prevent duplicate completed tasks
+
+// Extract timestamp from journalctl line
+function extractTimestamp(line) {
+  // journalctl format: "Mar 28 13:23:45 godzilla llama-server[12345]: message"
+  const match = line.match(/^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})/);
+  if (match) {
+    const dateStr = match[1];
+    const year = new Date().getFullYear();
+    const fullDate = `${year} ${dateStr}`;
+    const date = new Date(fullDate);
+    if (!isNaN(date.getTime())) {
+      return date.getTime();
+    }
+  }
+  return Date.now();
+}
 
 function getSystemResources() {
   const resources = {
@@ -94,15 +111,25 @@ function parseLlamaLogs(output) {
   const completedSlots = [];
   const lines = output.split('\n');
   
+  // Clear seen task IDs for this parse cycle (they'll be repopulated)
+  seenTaskIds.clear();
+  
   // First pass: find all completed tasks with their timing stats
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const logTime = extractTimestamp(line);
     
     // Look for print_timing header
     const timingMatch = line.match(/slot print_timing: id\s+(\d+)\s+\|\s+task\s+(\d+)/);
     if (timingMatch) {
       const slotId = parseInt(timingMatch[1]);
       const taskId = parseInt(timingMatch[2]);
+      
+      // Skip if we've already seen this task
+      if (seenTaskIds.has(taskId)) {
+        continue;
+      }
+      seenTaskIds.add(taskId);
       
       // Extract timing stats from the next few lines
       let promptEvalTime = null, promptTokens = null, promptTps = null;
@@ -134,10 +161,19 @@ function parseLlamaLogs(output) {
       }
       
       // Only add if we got the key stats
-      if (promptTps && evalTps) {
+      if (promptTps && evalTps && promptTps > 0 && evalTps > 0) {
         // Calculate times in reverse from tokens and t/s (since stdout doesn't give us the time directly)
         const promptTimeSeconds = promptTokens / promptTps;
         const evalTimeSeconds = evalTokens / evalTps;
+        
+        // Safe calculations with fallbacks
+        const calculatedTotalSeconds = promptTimeSeconds + evalTimeSeconds;
+        const calculatedTotalTokens = (promptTokens || 0) + (evalTokens || 0);
+        
+        // Use provided totalTime if available and valid, otherwise calculate
+        const finalTotalTime = (totalTime && !isNaN(totalTime)) ? totalTime : calculatedTotalSeconds * 1000;
+        const finalTotalSeconds = (totalTime && !isNaN(totalTime)) ? totalTime / 1000 : calculatedTotalSeconds;
+        const finalTotalTokens = (totalTokens && !isNaN(totalTokens)) ? totalTokens : calculatedTotalTokens;
         
         completedSlots.push({
           slotId,
@@ -145,20 +181,22 @@ function parseLlamaLogs(output) {
           state: 'done',
           promptTps,
           promptTokens,
-          promptTimeSeconds,
+          promptEvalTime: promptTimeSeconds * 1000, // Store as ms for consistency
           evalTps,
           evalTokens,
-          evalTimeSeconds,
-          totalTime: totalTime || (promptTimeSeconds + evalTimeSeconds) * 1000,
-          totalTimeSeconds: totalTime || (promptTimeSeconds + evalTimeSeconds),
-          totalTokens: totalTokens || (promptTokens || 0) + (evalTokens || 0),
-          timestamp: Date.now()
+          evalTime: evalTimeSeconds * 1000, // Store as ms for consistency
+          totalTime: finalTotalTime,
+          totalTimeSeconds: finalTotalSeconds,
+          totalTokens: finalTotalTokens,
+          timestamp: logTime // Use actual log timestamp
         });
         
-        // Track for average calculation
-        recentEvalTps.push(evalTps);
-        if (recentEvalTps.length > 10) {
-          recentEvalTps.shift();
+        // Track for average calculation (only if valid)
+        if (evalTps > 0 && !isNaN(evalTps)) {
+          recentEvalTps.push(evalTps);
+          if (recentEvalTps.length > 10) {
+            recentEvalTps.shift();
+          }
         }
       }
       continue;
@@ -621,29 +659,52 @@ const htmlContent = `<!DOCTYPE html>
       // Render completed slots
       if (hasCompleted) {
         for (const slot of data.completed) {
+          // Calculate time ago
+          const timeAgo = Date.now() - slot.timestamp;
+          const minutesAgo = Math.floor(timeAgo / 60000);
+          const secondsAgo = Math.floor((timeAgo % 60000) / 1000);
+          let timeAgoText;
+          if (minutesAgo > 0) {
+            timeAgoText = minutesAgo + 'm ago';
+          } else if (secondsAgo > 0) {
+            timeAgoText = secondsAgo + 's ago';
+          } else {
+            timeAgoText = 'just now';
+          }
+          
           tasksHTML += '<div class="task">';
           tasksHTML += '<div class="task-header">';
-          tasksHTML += '<span class="task-id">Slot ' + slot.slotId + ' - Task #' + slot.taskId + '</span>';
+          tasksHTML += '<span class="task-id">Slot ' + slot.slotId + ' - Task #' + slot.taskId + ' <span style="color: #64748b; margin-left: 8px;">(' + timeAgoText + ')</span></span>';
           tasksHTML += '<span class="task-state done">Completed</span>';
           tasksHTML += '</div>';
           
-          if (slot.promptTps && slot.evalTps) {
-            // Calculate overall tokens per second
-            const totalSeconds = slot.totalTime / 1000;
+          if (slot.promptTps && slot.evalTps && !isNaN(slot.promptTps) && !isNaN(slot.evalTps)) {
+            // Calculate overall tokens per second with safety checks
+            const totalSeconds = slot.totalTimeSeconds || (slot.totalTime / 1000);
             const overallTps = slot.totalTokens / totalSeconds;
+            
+            // Format times safely
+            const promptTimeFormatted = (slot.promptEvalTime / 1000).toFixed(1);
+            const evalTimeFormatted = (slot.evalTime / 1000).toFixed(1);
+            const totalTimeFormatted = totalSeconds.toFixed(1);
+            
+            // Format t/s safely
+            const promptTpsFormatted = slot.promptTps.toFixed(1);
+            const evalTpsFormatted = slot.evalTps.toFixed(1);
+            const overallTpsFormatted = !isNaN(overallTps) && isFinite(overallTps) ? overallTps.toFixed(1) : '0.0';
             
             tasksHTML += '<div class="task-stats">';
             tasksHTML += '<div class="task-stats-row">';
-            tasksHTML += '<span class="task-stats-left">Prompt: ' + (slot.promptEvalTime / 1000).toFixed(1) + 's / ' + slot.promptTokens + ' tokens</span>';
-            tasksHTML += '<span class="task-stats-right">' + slot.promptTps.toFixed(1) + ' t/s</span>';
+            tasksHTML += '<span class="task-stats-left">Prompt: ' + promptTimeFormatted + 's / ' + slot.promptTokens + ' tokens</span>';
+            tasksHTML += '<span class="task-stats-right">' + promptTpsFormatted + ' t/s</span>';
             tasksHTML += '</div>';
             tasksHTML += '<div class="task-stats-row">';
-            tasksHTML += '<span class="task-stats-left">Eval: ' + (slot.evalTime / 1000).toFixed(1) + 's / ' + slot.evalTokens + ' tokens</span>';
-            tasksHTML += '<span class="task-stats-right">' + slot.evalTps.toFixed(1) + ' t/s</span>';
+            tasksHTML += '<span class="task-stats-left">Eval: ' + evalTimeFormatted + 's / ' + slot.evalTokens + ' tokens</span>';
+            tasksHTML += '<span class="task-stats-right">' + evalTpsFormatted + ' t/s</span>';
             tasksHTML += '</div>';
             tasksHTML += '<div class="task-stats-row">';
-            tasksHTML += '<span class="task-stats-left">Total: ' + totalSeconds.toFixed(1) + 's / ' + slot.totalTokens + ' tokens</span>';
-            tasksHTML += '<span class="task-stats-right">' + overallTps.toFixed(1) + ' t/s</span>';
+            tasksHTML += '<span class="task-stats-left">Total: ' + totalTimeFormatted + 's / ' + slot.totalTokens + ' tokens</span>';
+            tasksHTML += '<span class="task-stats-right">' + overallTpsFormatted + ' t/s</span>';
             tasksHTML += '</div>';
             tasksHTML += '</div>';
           } else {
