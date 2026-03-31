@@ -46,7 +46,8 @@ function getSystemResources() {
     ram: { used: 0, total: 0, percent: 0 },
     vram: { used: 0, total: 0, percent: 0, available: false },
     gpuTemp: { value: 0, available: false },
-    gpuClock: { value: 0, available: false }
+    gpuClock: { value: 0, available: false },
+    gpuFan: { value: 0, available: false }
   };
   
   try {
@@ -66,7 +67,7 @@ function getSystemResources() {
   } catch (e) {}
   
   try {
-    const nvidiaSmi = execSync('nvidia-smi --query-gpu=memory.used,memory.total,temperature.gpu,clocks.current.graphics --format=csv,noheader,nounits 2>/dev/null', { encoding: 'utf8' });
+    const nvidiaSmi = execSync('nvidia-smi --query-gpu=memory.used,memory.total,temperature.gpu,clocks.current.graphics,fan.speed --format=csv,noheader,nounits 2>/dev/null', { encoding: 'utf8' });
     const lines = nvidiaSmi.trim().split('\n');
     
     // Parse VRAM (first GPU's memory)
@@ -84,12 +85,13 @@ function getSystemResources() {
       }
     }
     
-    // Parse temperature and clock (last line usually has temp and clock)
+    // Parse temperature, clock, and fan speed from nvidia-smi
     for (const line of lines) {
       const parts = line.split(',').map(p => p.trim());
-      if (parts.length >= 4) {
+      if (parts.length >= 5) {
         const tempMatch = parts[2]?.match(/^(\d+)$/);
         const clockMatch = parts[3]?.match(/^(\d+)$/);
+        const fanMatch = parts[4]?.match(/^(\d+)$/);
         
         if (tempMatch) {
           resources.gpuTemp.value = parseInt(tempMatch[1]);
@@ -99,7 +101,27 @@ function getSystemResources() {
           resources.gpuClock.value = parseInt(clockMatch[1]);
           resources.gpuClock.available = true;
         }
+        // nvidia-smi gives aggregate fan speed, but we'll get individual fans below
+        if (fanMatch) {
+          resources.gpuFan.value = parseInt(fanMatch[1]);
+          resources.gpuFan.available = true;
+        }
       }
+    }
+    
+    // Get individual fan speeds via nvidia-settings (requires DISPLAY=:1)
+    try {
+      const fan0 = execSync('DISPLAY=:1 nvidia-settings -q "[fan:0]/GPUTargetFanSpeed" -t 2>/dev/null', { encoding: 'utf8' }).trim();
+      const fan1 = execSync('DISPLAY=:1 nvidia-settings -q "[fan:1]/GPUTargetFanSpeed" -t 2>/dev/null', { encoding: 'utf8' }).trim();
+      
+      if (fan0 && !isNaN(parseInt(fan0))) {
+        resources.gpuFan0 = { value: parseInt(fan0), available: true };
+      }
+      if (fan1 && !isNaN(parseInt(fan1))) {
+        resources.gpuFan1 = { value: parseInt(fan1), available: true };
+      }
+    } catch (e) {
+      // nvidia-settings not available, stick with aggregate
     }
   } catch (e) {}
   
@@ -297,10 +319,36 @@ function getSlotsHash(slots) {
   })));
 }
 
+function getRunningLlamaServices() {
+  try {
+    // Find all running llama-server* services
+    const output = execSync('systemctl list-units --type=service --state=running --no-legend 2>/dev/null | grep "llama-server"', { encoding: 'utf8' });
+    const lines = output.trim().split('\n');
+    const services = lines
+      .map(line => line.trim().split(/\s+/)[0])  // Get first column (service name)
+      .filter(s => s && s.includes('.service'));
+    return services.length > 0 ? services : ['llama-server.service']; // fallback to default
+  } catch (e) {
+    return ['llama-server.service']; // fallback
+  }
+}
+
 function getMonitorData() {
   try {
-    const output = execSync('sudo journalctl -u llama-server -n 500 --no-pager 2>&1', { encoding: 'utf8' });
-    const parsed = parseLlamaLogs(output);
+    const services = getRunningLlamaServices();
+    let allOutput = '';
+    
+    // Collect logs from all running llama-server* services
+    for (const service of services) {
+      try {
+        const output = execSync(`sudo journalctl -u ${service} -n 500 --no-pager 2>&1`, { encoding: 'utf8' });
+        allOutput += output + '\n';
+      } catch (e) {
+        // Skip services we can't read
+      }
+    }
+    
+    const parsed = parseLlamaLogs(allOutput);
     const resources = getSystemResources();
     
     const activeHash = getSlotsHash(parsed.active);
@@ -323,7 +371,8 @@ function getMonitorData() {
       timestamp: Date.now(),
       active: parsed.active,
       completed: parsed.completed,
-      resources: resources
+      resources: resources,
+      services: services
     };
   } catch (error) {
     return null;
@@ -351,8 +400,14 @@ const htmlContent = `<!DOCTYPE html>
     .header {
       color: #00d4ff;
       font-weight: bold;
-      margin-bottom: 8px;
+      margin-bottom: 2px;
       font-size: 14px;
+    }
+    .service-name {
+      color: #64748b;
+      font-size: 9px;
+      margin-bottom: 8px;
+      font-family: monospace;
     }
     .main-content {
       flex: 1;
@@ -447,6 +502,7 @@ const htmlContent = `<!DOCTYPE html>
       display: flex;
       align-items: baseline;
       gap: 4px;
+      flex: 1;
     }
     .resource-name {
       font-size: 12px;
@@ -458,6 +514,9 @@ const htmlContent = `<!DOCTYPE html>
     .resource-percent {
       font-size: 11px;
       color: #94a3b8;
+      margin-left: auto;
+      text-align: right;
+      min-width: 35px;
     }
     .resource-bar {
       height: 3px;
@@ -477,6 +536,7 @@ const htmlContent = `<!DOCTYPE html>
 </head>
 <body>
   <div class="header">🦞 Llama Server Monitor</div>
+  <div class="service-name" id="service-name">Detecting service...</div>
   
   <div class="main-content">
     <div class="tasks" id="tasks">
@@ -535,15 +595,64 @@ const htmlContent = `<!DOCTYPE html>
         <div class="resource-bar-fill" id="clock-bar" style="width: 0%"></div>
       </div>
     </div>
+    
+    <div class="resource-row" id="fan-row" style="display: none;">
+      <div class="resource-header">
+        <div class="resource-label">
+          <span class="resource-name">GPU Fan 0</span>
+          <span class="resource-detail" id="fan0-detail">--</span>
+          <span class="resource-percent" id="fan0-percent">--</span>
+        </div>
+      </div>
+      <div class="resource-bar">
+        <div class="resource-bar-fill" id="fan0-bar" style="width: 0%"></div>
+      </div>
+    </div>
+    
+    <div class="resource-row" id="fan1-row" style="display: none;">
+      <div class="resource-header">
+        <div class="resource-label">
+          <span class="resource-name">GPU Fan 1</span>
+          <span class="resource-detail" id="fan1-detail">--</span>
+          <span class="resource-percent" id="fan1-percent">--</span>
+        </div>
+      </div>
+      <div class="resource-bar">
+        <div class="resource-bar-fill" id="fan1-bar" style="width: 0%"></div>
+      </div>
+    </div>
   </div>
   </div>
   
   <script>
+    const tasksContainer = document.getElementById('tasks');
+    
+    // Initial state
+    tasksContainer.innerHTML = '<div class="idle">Connecting to monitor...</div>';
+    
     const ws = new WebSocket('ws://' + location.host.replace(':' + location.port, ':' + (parseInt(location.port) + 1)));
     
+    ws.onopen = function() {
+      console.log('WebSocket connected');
+    };
+    
     ws.onmessage = function(event) {
-      const data = JSON.parse(event.data);
-      updateUI(data);
+      try {
+        const data = JSON.parse(event.data);
+        updateUI(data);
+      } catch (e) {
+        console.error('Error parsing message:', e);
+      }
+    };
+    
+    ws.onerror = function(error) {
+      console.error('WebSocket error:', error);
+      tasksContainer.innerHTML = '<div class="idle">Connection error. Refresh page.</div>';
+    };
+    
+    ws.onclose = function() {
+      console.log('WebSocket closed, reconnecting in 3s...');
+      setTimeout(() => location.reload(), 3000);
     };
     
     function getColorClass(percent) {
@@ -553,6 +662,12 @@ const htmlContent = `<!DOCTYPE html>
     }
     
     function updateUI(data) {
+      // Update service name
+      if (data.services && data.services.length > 0) {
+        const serviceName = data.services.join(', ');
+        document.getElementById('service-name').textContent = serviceName;
+      }
+      
       // Update RAM
       document.getElementById('ram-detail').textContent = data.resources.ram.used + 'GB/' + data.resources.ram.total + 'GB';
       document.getElementById('ram-percent').textContent = data.resources.ram.percent + '%';
@@ -601,6 +716,32 @@ const htmlContent = `<!DOCTYPE html>
         clockBar.className = 'resource-bar-fill ' + getColorClass(clockPercent);
       } else {
         clockRow.style.display = 'none';
+      }
+      
+      // Update GPU Fan 0
+      const fan0Row = document.getElementById('fan-row');
+      if (data.resources.gpuFan0 && data.resources.gpuFan0.available) {
+        fan0Row.style.display = 'block';
+        document.getElementById('fan0-detail').textContent = data.resources.gpuFan0.value + '%';
+        document.getElementById('fan0-percent').textContent = data.resources.gpuFan0.value + '%';
+        const fan0Bar = document.getElementById('fan0-bar');
+        fan0Bar.style.width = data.resources.gpuFan0.value + '%';
+        fan0Bar.className = 'resource-bar-fill ' + getColorClass(data.resources.gpuFan0.value);
+      } else {
+        fan0Row.style.display = 'none';
+      }
+      
+      // Update GPU Fan 1
+      const fan1Row = document.getElementById('fan1-row');
+      if (data.resources.gpuFan1 && data.resources.gpuFan1.available) {
+        fan1Row.style.display = 'block';
+        document.getElementById('fan1-detail').textContent = data.resources.gpuFan1.value + '%';
+        document.getElementById('fan1-percent').textContent = data.resources.gpuFan1.value + '%';
+        const fan1Bar = document.getElementById('fan1-bar');
+        fan1Bar.style.width = data.resources.gpuFan1.value + '%';
+        fan1Bar.className = 'resource-bar-fill ' + getColorClass(data.resources.gpuFan1.value);
+      } else {
+        fan1Row.style.display = 'none';
       }
       
       // Update tasks
@@ -742,6 +883,38 @@ wss.on('connection', (ws) => {
 let lastBroadcastTime = Date.now();
 const BROADCAST_INTERVAL = 5000; // 5 seconds
 
+function getFreshMonitorData() {
+  // Force get fresh data without checking hashes
+  try {
+    const services = getRunningLlamaServices();
+    let allOutput = '';
+    
+    for (const service of services) {
+      try {
+        const output = execSync(`sudo journalctl -u ${service} -n 500 --no-pager 2>&1`, { encoding: 'utf8' });
+        allOutput += output + '\n';
+      } catch (e) {}
+    }
+    
+    const parsed = parseLlamaLogs(allOutput);
+    const resources = getSystemResources();
+    
+    return {
+      timestamp: Date.now(),
+      active: parsed.active,
+      completed: parsed.completed,
+      resources: resources
+    };
+  } catch (error) {
+    return {
+      timestamp: Date.now(),
+      active: [],
+      completed: [],
+      resources: getSystemResources()
+    };
+  }
+}
+
 function pollAndBroadcast() {
   const data = getMonitorData();
   const now = Date.now();
@@ -751,12 +924,7 @@ function pollAndBroadcast() {
   
   if (data || forceBroadcast) {
     // If no changes detected but we're force-broadcasting, get fresh data
-    const messageData = data || getMonitorData() || {
-      timestamp: now,
-      active: [],
-      completed: [],
-      resources: getSystemResources()
-    };
+    const messageData = data || getFreshMonitorData();
     
     const message = JSON.stringify(messageData);
     lastBroadcastTime = now;
