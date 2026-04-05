@@ -154,6 +154,13 @@ Alex is focused on improving email/message management, nurturing relationships, 
 - No permission needed for greedy enrichment
 - Add discovered details (names, colors, dates, context)
 
+### ✅ Mocking & Sassy GIFs (2026-03-14)
+- Can send GIFs/images to Alex's Telegram **without asking permission**
+- For: mocking/roasting optimization impulses, celebrating wins, reacting to moments, visual expression
+- Tone: Loving roast, not mean. Think "best friend calling out nonsense"
+- GIF libraries: `reference/mocking/`, `reference/celebratory/`, `reference/stuck/`
+- **How to send:** See [[memory/tools/telegram-image-workflow.md]]
+
 ### ❌ Always Ask (Hard Boundaries)
 - Deleting from `research/downloads/`
 - System changes, installations, deletions
