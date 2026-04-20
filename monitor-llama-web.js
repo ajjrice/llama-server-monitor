@@ -110,9 +110,10 @@ function getSystemResources() {
     }
     
     // Get individual fan speeds via nvidia-settings (requires DISPLAY=:1)
+    // Use GPUCurrentFanSpeed to get actual fan speed, not GPUTargetFanSpeed (target)
     try {
-      const fan0 = execSync('DISPLAY=:1 nvidia-settings -q "[fan:0]/GPUTargetFanSpeed" -t 2>/dev/null', { encoding: 'utf8' }).trim();
-      const fan1 = execSync('DISPLAY=:1 nvidia-settings -q "[fan:1]/GPUTargetFanSpeed" -t 2>/dev/null', { encoding: 'utf8' }).trim();
+      const fan0 = execSync('nvidia-settings -q "[fan:0]/GPUCurrentFanSpeed" -t 2>/dev/null', { encoding: 'utf8', env: { ...process.env, DISPLAY: ':1' } }).trim();
+      const fan1 = execSync('nvidia-settings -q "[fan:1]/GPUCurrentFanSpeed" -t 2>/dev/null', { encoding: 'utf8', env: { ...process.env, DISPLAY: ':1' } }).trim();
       
       if (fan0 && !isNaN(parseInt(fan0))) {
         resources.gpuFan0 = { value: parseInt(fan0), available: true };
