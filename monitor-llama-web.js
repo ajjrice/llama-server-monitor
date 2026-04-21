@@ -132,27 +132,44 @@ function getSystemResources() {
 function parseLlamaLogs(output) {
   const activeSlots = {};
   const completedSlots = [];
+  const completedTaskIds = new Set(); // Track ALL completed task IDs
   const lines = output.split('\n');
   
   // Clear seen task IDs for this parse cycle (they'll be repopulated)
   seenTaskIds.clear();
   
-  // First pass: find all completed tasks with their timing stats
+  // First pass: find all completed tasks
+  // Two markers for completion:
+  // 1. "slot release" = definitive stop processing (always present)
+  // 2. "print_timing" = timing stats (may be outside log window)
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const logTime = extractTimestamp(line);
     
-    // Look for print_timing header
+    // Primary: slot release = task definitely done
+    const releaseMatch = line.match(/slot\s+release:\s+id\s+(\d+)\s+\|\s+task\s+(\d+)/);
+    if (releaseMatch) {
+      const slotId = parseInt(releaseMatch[1]);
+      const taskId = parseInt(releaseMatch[2]);
+      
+      if (!completedTaskIds.has(taskId)) {
+        completedTaskIds.add(taskId);
+        seenTaskIds.add(taskId);
+      }
+      continue;
+    }
+    
+    // Secondary: print_timing with stats = task done with timing data
     const timingMatch = line.match(/slot print_timing: id\s+(\d+)\s+\|\s+task\s+(\d+)/);
     if (timingMatch) {
       const slotId = parseInt(timingMatch[1]);
       const taskId = parseInt(timingMatch[2]);
       
-      // Skip if we've already seen this task
       if (seenTaskIds.has(taskId)) {
         continue;
       }
       seenTaskIds.add(taskId);
+      completedTaskIds.add(taskId);
       
       // Extract timing stats from the next few lines
       let promptEvalTime = null, promptTokens = null, promptTps = null;
@@ -185,15 +202,10 @@ function parseLlamaLogs(output) {
       
       // Only add if we got the key stats
       if (promptTps && evalTps && promptTps > 0 && evalTps > 0) {
-        // Calculate times in reverse from tokens and t/s (since stdout doesn't give us the time directly)
         const promptTimeSeconds = promptTokens / promptTps;
         const evalTimeSeconds = evalTokens / evalTps;
-        
-        // Safe calculations with fallbacks
         const calculatedTotalSeconds = promptTimeSeconds + evalTimeSeconds;
         const calculatedTotalTokens = (promptTokens || 0) + (evalTokens || 0);
-        
-        // Use provided totalTime if available and valid, otherwise calculate
         const finalTotalTime = (totalTime && !isNaN(totalTime)) ? totalTime : calculatedTotalSeconds * 1000;
         const finalTotalSeconds = (totalTime && !isNaN(totalTime)) ? totalTime / 1000 : calculatedTotalSeconds;
         const finalTotalTokens = (totalTokens && !isNaN(totalTokens)) ? totalTokens : calculatedTotalTokens;
@@ -204,17 +216,16 @@ function parseLlamaLogs(output) {
           state: 'done',
           promptTps,
           promptTokens,
-          promptEvalTime: promptTimeSeconds * 1000, // Store as ms for consistency
+          promptEvalTime: promptTimeSeconds * 1000,
           evalTps,
           evalTokens,
-          evalTime: evalTimeSeconds * 1000, // Store as ms for consistency
+          evalTime: evalTimeSeconds * 1000,
           totalTime: finalTotalTime,
           totalTimeSeconds: finalTotalSeconds,
           totalTokens: finalTotalTokens,
-          timestamp: logTime // Use actual log timestamp
+          timestamp: logTime
         });
         
-        // Track for average calculation (only if valid)
         if (evalTps > 0 && !isNaN(evalTps)) {
           recentEvalTps.push(evalTps);
           if (recentEvalTps.length > 10) {
@@ -239,9 +250,8 @@ function parseLlamaLogs(output) {
       
       lastCheckpointState[slotId] = null;
       
-      // Don't add if this task is already in completed
-      const isInCompleted = completedSlots.some(c => c.taskId === taskId);
-      if (!isInCompleted) {
+      // Don't add if this task is already completed
+      if (!completedTaskIds.has(taskId)) {
         activeSlots[slotId] = {
           slotId,
           taskId,
@@ -261,9 +271,8 @@ function parseLlamaLogs(output) {
       if (lastCheckpointState[slotId] !== taskId) {
         lastCheckpointState[slotId] = taskId;
         
-        const isInCompleted = completedSlots.some(c => c.taskId === taskId);
         if (!activeSlots[slotId] || activeSlots[slotId].state !== 'processing') {
-          if (!isInCompleted) {
+          if (!completedTaskIds.has(taskId)) {
             activeSlots[slotId] = {
               slotId,
               taskId,
@@ -284,8 +293,7 @@ function parseLlamaLogs(output) {
       
       lastCheckpointState[slotId] = null;
       
-      const isInCompleted = completedSlots.some(c => c.taskId === taskId);
-      if (activeSlots[slotId] && !isInCompleted) {
+      if (activeSlots[slotId] && !completedTaskIds.has(taskId)) {
         activeSlots[slotId].state = 'generating';
         activeSlots[slotId].progress = 1.0;
         activeSlots[slotId].lastSeen = Date.now();
@@ -322,15 +330,15 @@ function getSlotsHash(slots) {
 
 function getRunningLlamaServices() {
   try {
-    // Find all running llama-server* services
-    const output = execSync('systemctl list-units --type=service --state=running --no-legend 2>/dev/null | grep "llama-server"', { encoding: 'utf8' });
+    // Find all running llama-server* and llama-router services
+    const output = execSync('systemctl list-units --type=service --state=running --no-legend 2>/dev/null | grep -E "llama-(server|router|swap)"', { encoding: 'utf8' });
     const lines = output.trim().split('\n');
     const services = lines
       .map(line => line.trim().split(/\s+/)[0])  // Get first column (service name)
       .filter(s => s && s.includes('.service'));
-    return services.length > 0 ? services : ['llama-server.service']; // fallback to default
+    return services.length > 0 ? services : ['llama-router.service']; // fallback to router
   } catch (e) {
-    return ['llama-server.service']; // fallback
+    return ['llama-router.service']; // fallback
   }
 }
 
